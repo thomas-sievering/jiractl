@@ -39,10 +39,9 @@ type JiraUser struct {
 }
 
 type JiraSearchResponse struct {
-	StartAt    int          `json:"startAt"`
-	MaxResults int          `json:"maxResults"`
-	Total      int          `json:"total"`
-	Issues     []JiraIssue  `json:"issues"`
+	Total         int          `json:"total"`
+	Issues        []JiraIssue  `json:"issues"`
+	NextPageToken string       `json:"nextPageToken"`
 }
 
 type JiraIssue struct {
@@ -69,6 +68,18 @@ type JiraNameField struct {
 	Name string `json:"name"`
 }
 
+type JiraCommentsResponse struct {
+	Comments []JiraComment `json:"comments"`
+	Total    int           `json:"total"`
+}
+
+type JiraComment struct {
+	Author  *JiraUser `json:"author"`
+	Body    any       `json:"body"`
+	Created string    `json:"created"`
+	Updated string    `json:"updated"`
+}
+
 type JiraAPIError struct {
 	ErrorMessages []string          `json:"errorMessages"`
 	Errors        map[string]string `json:"errors"`
@@ -88,6 +99,18 @@ type IssueView struct {
 	Created  string `json:"created"`
 	Updated  string `json:"updated"`
 	URL      string `json:"url"`
+}
+
+type IssueDetailView struct {
+	IssueView
+	Description string       `json:"description"`
+	Comments    []CommentView `json:"comments,omitempty"`
+}
+
+type CommentView struct {
+	Author  string `json:"author"`
+	Body    string `json:"body"`
+	Created string `json:"created"`
 }
 
 // ---------------------------------------------------------------------------
@@ -402,21 +425,35 @@ func runIssuesView(args []string) error {
 		return err
 	}
 
-	view := issueToView(issue, cfg.Server)
+	comments, err := getComments(cfg, issueKey)
+	if err != nil {
+		return err
+	}
+
+	view := issueToDetailView(issue, cfg.Server, comments)
 
 	if *jsonOut {
 		return printJSON(view)
 	}
 
-	fmt.Printf("Key:      %s\n", view.Key)
-	fmt.Printf("Summary:  %s\n", view.Summary)
-	fmt.Printf("Status:   %s\n", view.Status)
-	fmt.Printf("Type:     %s\n", view.Type)
-	fmt.Printf("Priority: %s\n", view.Priority)
-	fmt.Printf("Assignee: %s\n", view.Assignee)
-	fmt.Printf("Created:  %s\n", view.Created)
-	fmt.Printf("Updated:  %s\n", view.Updated)
-	fmt.Printf("URL:      %s\n", view.URL)
+	fmt.Printf("Key:         %s\n", view.Key)
+	fmt.Printf("Summary:     %s\n", view.Summary)
+	fmt.Printf("Status:      %s\n", view.Status)
+	fmt.Printf("Type:        %s\n", view.Type)
+	fmt.Printf("Priority:    %s\n", view.Priority)
+	fmt.Printf("Assignee:    %s\n", view.Assignee)
+	fmt.Printf("Created:     %s\n", view.Created)
+	fmt.Printf("Updated:     %s\n", view.Updated)
+	fmt.Printf("URL:         %s\n", view.URL)
+	if view.Description != "" {
+		fmt.Printf("\nDescription:\n%s\n", view.Description)
+	}
+	if len(view.Comments) > 0 {
+		fmt.Printf("\nComments (%d):\n", len(view.Comments))
+		for _, c := range view.Comments {
+			fmt.Printf("\n  %s (%s):\n  %s\n", c.Author, c.Created, c.Body)
+		}
+	}
 	return nil
 }
 
@@ -475,23 +512,26 @@ func runIssuesSearch(args []string) error {
 
 func searchIssues(cfg Config, jql string, limit int) ([]JiraIssue, error) {
 	var all []JiraIssue
-	startAt := 0
+	nextPageToken := ""
+
+	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
 
 	for len(all) < limit {
 		maxResults := minInt(limit-len(all), 100)
 
-		u, err := url.Parse(cfg.Server + "/rest/api/3/search")
+		u, err := url.Parse(cfg.Server + "/rest/api/3/search/jql")
 		if err != nil {
 			return nil, err
 		}
 		q := u.Query()
 		q.Set("jql", jql)
 		q.Set("maxResults", fmt.Sprintf("%d", maxResults))
-		q.Set("startAt", fmt.Sprintf("%d", startAt))
 		q.Set("fields", "summary,status,issuetype,priority,assignee,reporter,created,updated,labels,components")
+		if nextPageToken != "" {
+			q.Set("nextPageToken", nextPageToken)
+		}
 		u.RawQuery = q.Encode()
 
-		client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
 		req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 		if err != nil {
 			return nil, err
@@ -510,10 +550,10 @@ func searchIssues(cfg Config, jql string, limit int) ([]JiraIssue, error) {
 
 		all = append(all, searchResp.Issues...)
 
-		if len(searchResp.Issues) == 0 || startAt+len(searchResp.Issues) >= searchResp.Total {
+		if len(searchResp.Issues) == 0 || searchResp.NextPageToken == "" {
 			break
 		}
-		startAt += len(searchResp.Issues)
+		nextPageToken = searchResp.NextPageToken
 	}
 
 	if len(all) > limit {
@@ -524,7 +564,7 @@ func searchIssues(cfg Config, jql string, limit int) ([]JiraIssue, error) {
 
 func getIssue(cfg Config, issueKey string) (JiraIssue, error) {
 	u := cfg.Server + "/rest/api/3/issue/" + url.PathEscape(issueKey) +
-		"?fields=summary,status,issuetype,priority,assignee,reporter,created,updated,labels,components"
+		"?fields=summary,description,status,issuetype,priority,assignee,reporter,created,updated,labels,components"
 
 	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
 	req, err := http.NewRequest(http.MethodGet, u, nil)
@@ -543,6 +583,28 @@ func getIssue(cfg Config, issueKey string) (JiraIssue, error) {
 		return JiraIssue{}, err
 	}
 	return issue, nil
+}
+
+func getComments(cfg Config, issueKey string) ([]JiraComment, error) {
+	u := cfg.Server + "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/comment?orderBy=-created&maxResults=20"
+
+	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("jira api request failed: %w", err)
+	}
+
+	var commentsResp JiraCommentsResponse
+	if err := decodeAPIResponse(resp, &commentsResp); err != nil {
+		return nil, err
+	}
+	return commentsResp.Comments, nil
 }
 
 // ---------------------------------------------------------------------------
@@ -723,6 +785,85 @@ func issuesToViews(issues []JiraIssue, server string) []IssueView {
 		views[i] = issueToView(issue, server)
 	}
 	return views
+}
+
+func issueToDetailView(issue JiraIssue, server string, comments []JiraComment) IssueDetailView {
+	dv := IssueDetailView{
+		IssueView:   issueToView(issue, server),
+		Description: adfToText(issue.Fields.Description),
+	}
+	for _, c := range comments {
+		dv.Comments = append(dv.Comments, CommentView{
+			Author:  userDisplayName(c.Author),
+			Body:    adfToText(c.Body),
+			Created: formatDate(c.Created),
+		})
+	}
+	return dv
+}
+
+func userDisplayName(u *JiraUser) string {
+	if u == nil {
+		return ""
+	}
+	if u.DisplayName != "" {
+		return u.DisplayName
+	}
+	return u.EmailAddress
+}
+
+// adfToText extracts plain text from Jira's Atlassian Document Format.
+func adfToText(v any) string {
+	if v == nil {
+		return ""
+	}
+	if s, ok := v.(string); ok {
+		return s
+	}
+	doc, ok := v.(map[string]any)
+	if !ok {
+		return ""
+	}
+	var sb strings.Builder
+	adfExtract(doc, &sb)
+	return strings.TrimSpace(sb.String())
+}
+
+func adfExtract(node map[string]any, sb *strings.Builder) {
+	// Text node
+	if text, ok := node["text"].(string); ok {
+		sb.WriteString(text)
+	}
+
+	// Recurse into content array
+	content, ok := node["content"].([]any)
+	if !ok {
+		return
+	}
+
+	nodeType, _ := node["type"].(string)
+	for i, child := range content {
+		childMap, ok := child.(map[string]any)
+		if !ok {
+			continue
+		}
+		adfExtract(childMap, sb)
+
+		// Add newline between block-level siblings
+		childType, _ := childMap["type"].(string)
+		if childType == "paragraph" || childType == "heading" || childType == "bulletList" ||
+			childType == "orderedList" || childType == "blockquote" || childType == "codeBlock" ||
+			childType == "mediaSingle" || childType == "rule" {
+			if i < len(content)-1 {
+				sb.WriteString("\n")
+			}
+		}
+	}
+
+	// List items get newlines
+	if nodeType == "listItem" {
+		sb.WriteString("\n")
+	}
 }
 
 func nameOrEmpty(f *JiraNameField) string {

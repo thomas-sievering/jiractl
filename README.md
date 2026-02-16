@@ -8,116 +8,213 @@
 
 Jira Cloud CLI for agents.
 
-View assigned issues, search with JQL, and get compact JSON output.
+Fetch assigned issues, search with JQL, and get compact JSON - designed for AI agents and automation, not TUIs.
+
+## Why jiractl?
+
+The existing [jira-cli](https://github.com/ankitpokhrel/jira-cli) is built for humans (interactive TUI, incomplete JSON output, heavy dependencies). `jiractl` is built for agents:
+
+- **Compact JSON output** - 9 essential fields per issue, not Jira's 200+ field API dump
+- **Zero dependencies** - single static binary, stdlib only
+- **Simple auth** - email + API token, no OAuth dance
+- **Predictable** - every data command supports `--json`, errors go to stderr
 
 ## Quick Start
 
 ```powershell
-# 1) Login with your Jira Cloud credentials
+# 1) Generate an API token at:
+#    https://id.atlassian.com/manage-profile/security/api-tokens
+
+# 2) Login
 jiractl auth login --server https://company.atlassian.net --email you@company.com
 
-# 2) View your assigned issues
-jiractl issues mine --limit 20
+# 3) View your assigned issues
+jiractl issues mine
 
-# 3) View a specific issue
+# 4) View a specific issue
 jiractl issues view PROJ-123
 
-# 4) Search with JQL
-jiractl issues search --jql "project = PROJ AND status = 'In Progress'" --limit 50
+# 5) Search with JQL
+jiractl issues search --jql "project = PROJ AND status = 'In Progress'"
 
-# 5) Get JSON output for agent consumption
+# 6) Get JSON for agent consumption
 jiractl issues mine --json
 ```
 
 ## Install
 
-### Option A: Download Binary (recommended for users)
+### Option A: Download binary
 
-Use the GitHub Release asset for your OS and run `jiractl` directly.
+Grab the latest release for your platform from [Releases](https://github.com/thomas-sievering/jiractl/releases) and add it to your PATH.
 
-### Option B: Build from source (dev)
+### Option B: Build from source
 
 ```powershell
 go build -o jiractl.exe .
 ```
 
-End users do **not** need Go if you ship the binary.
+End users do **not** need Go installed if you distribute the binary.
 
 ## Commands
 
 ### Auth
 
-```powershell
-jiractl auth login --server https://company.atlassian.net --email you@company.com
-jiractl auth status --json
+```
+jiractl auth login   --server URL --email EMAIL [--token TOKEN]
+jiractl auth status  [--json]
 jiractl auth logout
 ```
 
+`auth login` verifies credentials against the Jira API before saving. If `--token` is omitted, it prompts interactively (or reads `JIRACTL_API_TOKEN`).
+
 ### Issues
 
-```powershell
-# My assigned issues
-jiractl issues mine --limit 20 --status "In Progress"
-
-# View single issue
-jiractl issues view PROJ-123 --json
-
-# Custom JQL search
-jiractl issues search --jql "project = PROJ" --limit 50 --json
+```
+jiractl issues mine    [--limit N] [--status STATUS] [--json]
+jiractl issues view    ISSUE-KEY [--json]
+jiractl issues search  --jql "..." [--limit N] [--json]
 ```
 
-## Auth Configuration
+| Command | Description | Default limit |
+|---------|-------------|---------------|
+| `mine` | Issues assigned to you, ordered by last updated | 50 |
+| `view` | Single issue detail by key (e.g. `PROJ-123`) | - |
+| `search` | Custom JQL query | 50 |
 
-Auth uses Jira Cloud basic auth (email + API token).
+### Other
 
-Generate an API token at: https://id.atlassian.com/manage-profile/security/api-tokens
-
-Config priority: flags > env vars > config file.
-
-Environment variables for CI/agent use:
-- `JIRACTL_SERVER` - Jira Cloud server URL
-- `JIRACTL_EMAIL` - account email
-- `JIRACTL_API_TOKEN` - API token
+```
+jiractl version
+jiractl help
+```
 
 ## JSON Output
 
-- `--json` outputs compact JSON by default (agent-friendly).
-- Set `JIRACTL_JSON_PRETTY=1` to switch to pretty JSON for debugging.
+Add `--json` to any data command. Output is **compact by default** (single line, minimal tokens).
 
 ```powershell
-# compact JSON
-jiractl issues mine --json
-
-# pretty JSON
-$env:JIRACTL_JSON_PRETTY = "1"
 jiractl issues mine --json
 ```
 
+```json
+{"server":"https://company.atlassian.net","count":2,"issues":[{"key":"PROJ-123","summary":"Fix login bug","status":"In Progress","type":"Bug","priority":"High","assignee":"you@company.com","created":"2026-02-10","updated":"2026-02-15","url":"https://company.atlassian.net/browse/PROJ-123"},{"key":"PROJ-456","summary":"Add dark mode","status":"To Do","type":"Story","priority":"Medium","assignee":"you@company.com","created":"2026-02-12","updated":"2026-02-14","url":"https://company.atlassian.net/browse/PROJ-456"}]}
+```
+
+Set `JIRACTL_JSON_PRETTY=1` for indented output:
+
+```powershell
+$env:JIRACTL_JSON_PRETTY = "1"   # PowerShell
+export JIRACTL_JSON_PRETTY=1      # bash/zsh
+```
+
+```json
+{
+  "server": "https://company.atlassian.net",
+  "count": 1,
+  "issues": [
+    {
+      "key": "PROJ-123",
+      "summary": "Fix login bug",
+      "status": "In Progress",
+      "type": "Bug",
+      "priority": "High",
+      "assignee": "you@company.com",
+      "created": "2026-02-10",
+      "updated": "2026-02-15",
+      "url": "https://company.atlassian.net/browse/PROJ-123"
+    }
+  ]
+}
+```
+
+Human-readable output (without `--json`):
+
+```
+Assigned issues (2):
+- PROJ-123      [In Progress]  Fix login bug
+- PROJ-456      [To Do]        Add dark mode
+```
+
+## Authentication
+
+`jiractl` uses Jira Cloud basic auth (email + API token).
+
+### Generate an API token
+
+1. Go to https://id.atlassian.com/manage-profile/security/api-tokens
+2. Click **Create API token**
+3. Copy the token
+
+### Login
+
+```powershell
+jiractl auth login --server https://company.atlassian.net --email you@company.com
+# Prompts for API token interactively
+```
+
+Or pass the token directly (useful for scripts):
+
+```powershell
+jiractl auth login --server https://company.atlassian.net --email you@company.com --token YOUR_TOKEN
+```
+
+### Environment variables (CI / agent use)
+
+For non-interactive environments, set these instead of using `auth login`:
+
+| Variable | Description |
+|----------|-------------|
+| `JIRACTL_SERVER` | Jira Cloud URL (e.g. `https://company.atlassian.net`) |
+| `JIRACTL_EMAIL` | Account email |
+| `JIRACTL_API_TOKEN` | API token |
+
+Resolution order: **flags > env vars > config file**.
+
 ## Files and Storage
 
-`jiractl` stores config in your user config dir:
+Config is stored in your OS config directory with `0600` permissions:
 
-- Windows: `%APPDATA%\jiractl\config.json`
-- Linux/macOS: `~/.config/jiractl/config.json`
+| OS | Path |
+|----|------|
+| Windows | `%APPDATA%\jiractl\config.json` |
+| Linux | `~/.config/jiractl/config.json` |
+| macOS | `~/.config/jiractl/config.json` |
+
+Config format:
+
+```json
+{
+  "server": "https://company.atlassian.net",
+  "email": "you@company.com",
+  "api_token": "..."
+}
+```
+
+## Agent Integration
+
+`jiractl` ships with a [`SKILL.md`](./SKILL.md) for use as a Claude Code / Codex / Cursor skill.
+
+Install it by adding this repo's `SKILL.md` to your project's skills directory. The skill auto-detects when users ask about Jira issues and runs the right commands.
 
 ## Troubleshooting
 
-- `not authenticated`:
-  Run `jiractl auth login --server https://company.atlassian.net --email you@company.com`
-- `401 Unauthorized`:
-  Your API token may have expired. Generate a new one and re-login.
-- `404 Not Found`:
-  Check that the issue key or server URL is correct.
+| Error | Fix |
+|-------|-----|
+| `not authenticated` | Run `jiractl auth login --server URL --email EMAIL` |
+| `401 Unauthorized` | API token expired. Generate a new one and re-login |
+| `404 Not Found` | Check the issue key or server URL is correct |
+| `403 Forbidden` | Your account may lack permission for that project |
+| Connection errors | Check the server URL and your network connection |
 
 ## Automated Releases
 
-This repo includes `.github/workflows/release.yml`.
+On tag push (`v*`), GitHub Actions builds binaries for 6 targets:
 
-On tag push (`v*`), GitHub Actions will:
-
-- Build binaries for Windows/Linux/macOS (amd64 + arm64)
-- Package assets (`.zip` for Windows, `.tar.gz` for Linux/macOS)
-- Publish them to the GitHub Release for that tag
+| OS | Architectures |
+|----|---------------|
+| Windows | amd64, arm64 |
+| Linux | amd64, arm64 |
+| macOS | amd64, arm64 |
 
 Publish a release:
 
