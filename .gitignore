@@ -1,0 +1,19 @@
+# Build outputs
+*.exe
+*.out
+dist/
+build/
+
+# Local runtime/state
+*.log
+
+# Environment/secrets
+.env
+.env.*
+!.env.example
+
+# OS/editor
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
