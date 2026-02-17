@@ -2,7 +2,7 @@
 
 [![CI](https://github.com/thomas-sievering/jiractl/actions/workflows/ci.yml/badge.svg)](https://github.com/thomas-sievering/jiractl/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/go-1.23%2B-00ADD8?logo=go)](https://go.dev/)
-[![Release](https://img.shields.io/badge/release-not%20published-lightgrey)](https://github.com/thomas-sievering/jiractl/releases)
+[![Release](https://img.shields.io/github/v/release/thomas-sievering/jiractl?display_name=tag)](https://github.com/thomas-sievering/jiractl/releases)
 [![Platforms](https://img.shields.io/badge/platforms-windows%20%7C%20linux%20%7C%20macOS-6f42c1)](#install)
 [![License](https://img.shields.io/badge/license-MIT-green)](./LICENSE)
 
@@ -53,6 +53,12 @@ Grab the latest release for your platform from [Releases](https://github.com/tho
 go build -o jiractl.exe .
 ```
 
+Set a release version at build time:
+
+```powershell
+go build -ldflags "-X main.version=v0.1.0" -o jiractl.exe .
+```
+
 End users do **not** need Go installed if you distribute the binary.
 
 ## Commands
@@ -71,14 +77,14 @@ jiractl auth logout
 
 ```
 jiractl issues mine    [--limit N] [--status STATUS] [--json]
-jiractl issues view    ISSUE-KEY [--json]
+jiractl issues view    ISSUE-KEY [--comment-limit N] [--json]
 jiractl issues search  --jql "..." [--limit N] [--json]
 ```
 
 | Command | Description | Default limit |
 |---------|-------------|---------------|
 | `mine` | Issues assigned to you, ordered by last updated | 50 |
-| `view` | Single issue detail by key (e.g. `PROJ-123`) | - |
+| `view` | Single issue detail by key (e.g. `PROJ-123`) | comments: 20 |
 | `search` | Custom JQL query | 50 |
 
 ### Other
@@ -97,7 +103,7 @@ jiractl issues mine --json
 ```
 
 ```json
-{"server":"https://company.atlassian.net","count":2,"issues":[{"key":"PROJ-123","summary":"Fix login bug","status":"In Progress","type":"Bug","priority":"High","assignee":"you@company.com","created":"2026-02-10","updated":"2026-02-15","url":"https://company.atlassian.net/browse/PROJ-123"},{"key":"PROJ-456","summary":"Add dark mode","status":"To Do","type":"Story","priority":"Medium","assignee":"you@company.com","created":"2026-02-12","updated":"2026-02-14","url":"https://company.atlassian.net/browse/PROJ-456"}]}
+{"server":"https://company.atlassian.net","count":2,"total":24,"has_more":true,"issues":[{"key":"PROJ-123","summary":"Fix login bug","status":"In Progress","type":"Bug","priority":"High","assignee":"you@company.com","created":"2026-02-10","updated":"2026-02-15","url":"https://company.atlassian.net/browse/PROJ-123"},{"key":"PROJ-456","summary":"Add dark mode","status":"To Do","type":"Story","priority":"Medium","assignee":"you@company.com","created":"2026-02-12","updated":"2026-02-14","url":"https://company.atlassian.net/browse/PROJ-456"}]}
 ```
 
 Set `JIRACTL_JSON_PRETTY=1` for indented output:
@@ -111,6 +117,8 @@ export JIRACTL_JSON_PRETTY=1      # bash/zsh
 {
   "server": "https://company.atlassian.net",
   "count": 1,
+  "total": 1,
+  "has_more": false,
   "issues": [
     {
       "key": "PROJ-123",

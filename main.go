@@ -2,6 +2,7 @@ package main
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -13,9 +14,12 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"sort"
 	"strings"
 	"time"
 )
+
+var version = "dev"
 
 // ---------------------------------------------------------------------------
 // Config types
@@ -39,9 +43,9 @@ type JiraUser struct {
 }
 
 type JiraSearchResponse struct {
-	Total         int          `json:"total"`
-	Issues        []JiraIssue  `json:"issues"`
-	NextPageToken string       `json:"nextPageToken"`
+	Total         int         `json:"total"`
+	Issues        []JiraIssue `json:"issues"`
+	NextPageToken string      `json:"nextPageToken"`
 }
 
 type JiraIssue struct {
@@ -51,17 +55,17 @@ type JiraIssue struct {
 }
 
 type JiraIssueFields struct {
-	Summary     string           `json:"summary"`
-	Description any              `json:"description"`
-	Status      *JiraNameField   `json:"status"`
-	IssueType   *JiraNameField   `json:"issuetype"`
-	Priority    *JiraNameField   `json:"priority"`
-	Assignee    *JiraUser        `json:"assignee"`
-	Reporter    *JiraUser        `json:"reporter"`
-	Created     string           `json:"created"`
-	Updated     string           `json:"updated"`
-	Labels      []string         `json:"labels"`
-	Components  []JiraNameField  `json:"components"`
+	Summary     string          `json:"summary"`
+	Description any             `json:"description"`
+	Status      *JiraNameField  `json:"status"`
+	IssueType   *JiraNameField  `json:"issuetype"`
+	Priority    *JiraNameField  `json:"priority"`
+	Assignee    *JiraUser       `json:"assignee"`
+	Reporter    *JiraUser       `json:"reporter"`
+	Created     string          `json:"created"`
+	Updated     string          `json:"updated"`
+	Labels      []string        `json:"labels"`
+	Components  []JiraNameField `json:"components"`
 }
 
 type JiraNameField struct {
@@ -85,6 +89,48 @@ type JiraAPIError struct {
 	Errors        map[string]string `json:"errors"`
 }
 
+type JiraTransitionsResponse struct {
+	Transitions []JiraTransition `json:"transitions"`
+}
+
+type JiraTransition struct {
+	ID   string         `json:"id"`
+	Name string         `json:"name"`
+	To   *JiraNameField `json:"to"`
+}
+
+type JiraTransitionRequest struct {
+	Transition JiraTransitionID `json:"transition"`
+}
+
+type JiraTransitionID struct {
+	ID string `json:"id"`
+}
+
+type JiraAssignRequest struct {
+	AccountID string `json:"accountId"`
+}
+
+type JiraCommentRequest struct {
+	Body JiraADFDocument `json:"body"`
+}
+
+type JiraADFDocument struct {
+	Type    string             `json:"type"`
+	Version int                `json:"version"`
+	Content []JiraADFParagraph `json:"content"`
+}
+
+type JiraADFParagraph struct {
+	Type    string        `json:"type"`
+	Content []JiraADFText `json:"content"`
+}
+
+type JiraADFText struct {
+	Type string `json:"type"`
+	Text string `json:"text"`
+}
+
 // ---------------------------------------------------------------------------
 // Compact output types (agent-friendly)
 // ---------------------------------------------------------------------------
@@ -101,9 +147,17 @@ type IssueView struct {
 	URL      string `json:"url"`
 }
 
+type IssueListView struct {
+	Server  string      `json:"server"`
+	Count   int         `json:"count"`
+	Total   int         `json:"total"`
+	HasMore bool        `json:"has_more"`
+	Issues  []IssueView `json:"issues"`
+}
+
 type IssueDetailView struct {
 	IssueView
-	Description string       `json:"description"`
+	Description string        `json:"description"`
 	Comments    []CommentView `json:"comments,omitempty"`
 }
 
@@ -111,6 +165,27 @@ type CommentView struct {
 	Author  string `json:"author"`
 	Body    string `json:"body"`
 	Created string `json:"created"`
+}
+
+type TransitionResult struct {
+	Key       string `json:"key"`
+	Status    string `json:"status"`
+	MatchedBy string `json:"matched_by,omitempty"`
+	Warning   string `json:"warning,omitempty"`
+	URL       string `json:"url"`
+}
+
+type AssignResult struct {
+	Key          string `json:"key"`
+	Assignee     string `json:"assignee"`
+	AssigneeName string `json:"assignee_name"`
+	URL          string `json:"url"`
+}
+
+type CommentResult struct {
+	Key     string `json:"key"`
+	Comment string `json:"comment"`
+	URL     string `json:"url"`
 }
 
 // ---------------------------------------------------------------------------
@@ -136,7 +211,7 @@ func run() error {
 	case "issues":
 		return runIssues(os.Args[2:])
 	case "version", "--version", "-v":
-		fmt.Println("jiractl dev")
+		fmt.Printf("jiractl %s\n", version)
 		return nil
 	case "help", "--help", "-h":
 		printRootHelp()
@@ -158,9 +233,12 @@ func printRootHelp() {
 	fmt.Println("  auth login    Authenticate with Jira Cloud")
 	fmt.Println("  auth status   Show current auth status")
 	fmt.Println("  auth logout   Remove stored credentials")
-	fmt.Println("  issues mine   List issues assigned to you")
-	fmt.Println("  issues view   View a single issue by key")
-	fmt.Println("  issues search Search issues with JQL")
+	fmt.Println("  issues mine       List issues assigned to you")
+	fmt.Println("  issues view       View a single issue by key")
+	fmt.Println("  issues search     Search issues with JQL")
+	fmt.Println("  issues transition Change issue status")
+	fmt.Println("  issues assign     Reassign an issue")
+	fmt.Println("  issues comment    Add a comment to an issue")
 	fmt.Println("  version       Print version")
 	fmt.Println("  help          Show this help")
 	fmt.Println()
@@ -176,9 +254,12 @@ func printAuthHelp() {
 
 func printIssuesHelp() {
 	fmt.Println("jiractl issues commands:")
-	fmt.Println("  issues mine    [--limit N] [--status STATUS] [--json]")
-	fmt.Println("  issues view    ISSUE-KEY [--json]")
-	fmt.Println("  issues search  --jql \"...\" [--limit N] [--json]")
+	fmt.Println("  issues mine       [--limit N] [--status STATUS] [--json]")
+	fmt.Println("  issues view       ISSUE-KEY [--comment-limit N] [--json]")
+	fmt.Println("  issues search     --jql \"...\" [--limit N] [--json]")
+	fmt.Println("  issues transition ISSUE-KEY --status \"STATUS\" [--json]")
+	fmt.Println("  issues assign     ISSUE-KEY [--email EMAIL] [--json]")
+	fmt.Println("  issues comment    ISSUE-KEY --body \"TEXT\" [--json]")
 }
 
 // ---------------------------------------------------------------------------
@@ -342,6 +423,12 @@ func runIssues(args []string) error {
 		return runIssuesView(args[1:])
 	case "search":
 		return runIssuesSearch(args[1:])
+	case "transition":
+		return runIssuesTransition(args[1:])
+	case "assign":
+		return runIssuesAssign(args[1:])
+	case "comment":
+		return runIssuesComment(args[1:])
 	case "help", "--help", "-h":
 		printIssuesHelp()
 		return nil
@@ -374,19 +461,21 @@ func runIssuesMine(args []string) error {
 		jql = fmt.Sprintf("assignee = currentUser() AND status = %q ORDER BY updated DESC", *status)
 	}
 
-	issues, err := searchIssues(cfg, jql, *limit)
+	searchResult, err := searchIssues(cfg, jql, *limit)
 	if err != nil {
 		return err
 	}
 
-	views := issuesToViews(issues, cfg.Server)
+	views := issuesToViews(searchResult.Issues, cfg.Server)
+	out := IssueListView{
+		Server:  cfg.Server,
+		Count:   len(views),
+		Total:   searchResult.Total,
+		HasMore: searchResult.HasMore,
+		Issues:  views,
+	}
 
 	if *jsonOut {
-		out := map[string]any{
-			"server": cfg.Server,
-			"count":  len(views),
-			"issues": views,
-		}
 		return printJSON(out)
 	}
 
@@ -395,7 +484,11 @@ func runIssuesMine(args []string) error {
 		return nil
 	}
 
-	fmt.Printf("Assigned issues (%d):\n", len(views))
+	if out.Total > len(views) || out.HasMore {
+		fmt.Printf("Assigned issues (%d of %d):\n", len(views), out.Total)
+	} else {
+		fmt.Printf("Assigned issues (%d):\n", len(views))
+	}
 	for _, v := range views {
 		fmt.Printf("- %-12s  [%s]  %s\n", v.Key, v.Status, v.Summary)
 	}
@@ -404,9 +497,13 @@ func runIssuesMine(args []string) error {
 
 func runIssuesView(args []string) error {
 	fs := flag.NewFlagSet("issues view", flag.ContinueOnError)
+	commentLimit := fs.Int("comment-limit", 20, "max comments to return")
 	jsonOut := fs.Bool("json", false, "print JSON")
 	if err := fs.Parse(args); err != nil {
 		return err
+	}
+	if *commentLimit <= 0 {
+		return errors.New("--comment-limit must be greater than 0")
 	}
 
 	remaining := fs.Args()
@@ -425,7 +522,7 @@ func runIssuesView(args []string) error {
 		return err
 	}
 
-	comments, err := getComments(cfg, issueKey)
+	comments, err := getComments(cfg, issueKey, *commentLimit)
 	if err != nil {
 		return err
 	}
@@ -478,19 +575,21 @@ func runIssuesSearch(args []string) error {
 		return err
 	}
 
-	issues, err := searchIssues(cfg, *jql, *limit)
+	searchResult, err := searchIssues(cfg, *jql, *limit)
 	if err != nil {
 		return err
 	}
 
-	views := issuesToViews(issues, cfg.Server)
+	views := issuesToViews(searchResult.Issues, cfg.Server)
+	out := IssueListView{
+		Server:  cfg.Server,
+		Count:   len(views),
+		Total:   searchResult.Total,
+		HasMore: searchResult.HasMore,
+		Issues:  views,
+	}
 
 	if *jsonOut {
-		out := map[string]any{
-			"server": cfg.Server,
-			"count":  len(views),
-			"issues": views,
-		}
 		return printJSON(out)
 	}
 
@@ -499,10 +598,184 @@ func runIssuesSearch(args []string) error {
 		return nil
 	}
 
-	fmt.Printf("Issues (%d):\n", len(views))
+	if out.Total > len(views) || out.HasMore {
+		fmt.Printf("Issues (%d of %d):\n", len(views), out.Total)
+	} else {
+		fmt.Printf("Issues (%d):\n", len(views))
+	}
 	for _, v := range views {
 		fmt.Printf("- %-12s  [%s]  %s\n", v.Key, v.Status, v.Summary)
 	}
+	return nil
+}
+
+func runIssuesTransition(args []string) error {
+	fs := flag.NewFlagSet("issues transition", flag.ContinueOnError)
+	status := fs.String("status", "", "target status name (required)")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	remaining := fs.Args()
+	if len(remaining) == 0 {
+		return errors.New("issue key is required (e.g. jiractl issues transition PROJ-123 --status \"In Progress\")")
+	}
+	issueKey := strings.ToUpper(remaining[0])
+
+	if *status == "" {
+		return errors.New("--status is required (e.g. --status \"In Progress\")")
+	}
+
+	cfg, err := loadAuthConfig()
+	if err != nil {
+		return err
+	}
+
+	transitions, err := getTransitions(cfg, issueKey)
+	if err != nil {
+		return err
+	}
+
+	matched, matchedBy, warning, err := matchTransition(transitions, *status)
+	if err != nil {
+		return err
+	}
+
+	if err := doTransition(cfg, issueKey, matched.ID); err != nil {
+		return err
+	}
+
+	result := TransitionResult{
+		Key:       issueKey,
+		Status:    matched.Name,
+		MatchedBy: matchedBy,
+		Warning:   warning,
+		URL:       cfg.Server + "/browse/" + issueKey,
+	}
+
+	if *jsonOut {
+		return printJSON(result)
+	}
+
+	if warning != "" {
+		fmt.Fprintln(os.Stderr, "warning:", warning)
+	}
+	fmt.Printf("%s transitioned to %s\n", result.Key, result.Status)
+	return nil
+}
+
+func runIssuesAssign(args []string) error {
+	fs := flag.NewFlagSet("issues assign", flag.ContinueOnError)
+	email := fs.String("email", "", "assignee email (defaults to reporter)")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	remaining := fs.Args()
+	if len(remaining) == 0 {
+		return errors.New("issue key is required (e.g. jiractl issues assign PROJ-123)")
+	}
+	issueKey := strings.ToUpper(remaining[0])
+
+	cfg, err := loadAuthConfig()
+	if err != nil {
+		return err
+	}
+
+	var accountID string
+	var displayName string
+	var assigneeEmail string
+
+	if *email == "" {
+		// Default to reporter
+		issue, err := getIssue(cfg, issueKey)
+		if err != nil {
+			return err
+		}
+		if issue.Fields.Reporter == nil || issue.Fields.Reporter.AccountID == "" {
+			return errors.New("issue has no reporter; use --email to specify an assignee")
+		}
+		accountID = issue.Fields.Reporter.AccountID
+		displayName = issue.Fields.Reporter.DisplayName
+		assigneeEmail = issue.Fields.Reporter.EmailAddress
+	} else {
+		users, err := searchUser(cfg, *email)
+		if err != nil {
+			return err
+		}
+		if len(users) == 0 {
+			return fmt.Errorf("no user found for %q", *email)
+		}
+		accountID = users[0].AccountID
+		displayName = users[0].DisplayName
+		assigneeEmail = users[0].EmailAddress
+	}
+
+	if err := assignIssue(cfg, issueKey, accountID); err != nil {
+		return err
+	}
+
+	result := AssignResult{
+		Key:          issueKey,
+		Assignee:     assigneeEmail,
+		AssigneeName: displayName,
+		URL:          cfg.Server + "/browse/" + issueKey,
+	}
+
+	if *jsonOut {
+		return printJSON(result)
+	}
+
+	if displayName != "" && assigneeEmail != "" {
+		fmt.Printf("%s assigned to %s (%s)\n", result.Key, displayName, assigneeEmail)
+	} else if displayName != "" {
+		fmt.Printf("%s assigned to %s\n", result.Key, displayName)
+	} else {
+		fmt.Printf("%s assigned to %s\n", result.Key, assigneeEmail)
+	}
+	return nil
+}
+
+func runIssuesComment(args []string) error {
+	fs := flag.NewFlagSet("issues comment", flag.ContinueOnError)
+	body := fs.String("body", "", "comment text (required)")
+	jsonOut := fs.Bool("json", false, "print JSON")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+
+	remaining := fs.Args()
+	if len(remaining) == 0 {
+		return errors.New("issue key is required (e.g. jiractl issues comment PROJ-123 --body \"text\")")
+	}
+	issueKey := strings.ToUpper(remaining[0])
+
+	if *body == "" {
+		return errors.New("--body is required")
+	}
+
+	cfg, err := loadAuthConfig()
+	if err != nil {
+		return err
+	}
+
+	if err := addComment(cfg, issueKey, *body); err != nil {
+		return err
+	}
+
+	result := CommentResult{
+		Key:     issueKey,
+		Comment: *body,
+		URL:     cfg.Server + "/browse/" + issueKey,
+	}
+
+	if *jsonOut {
+		return printJSON(result)
+	}
+
+	fmt.Printf("Comment added to %s\n", result.Key)
 	return nil
 }
 
@@ -510,7 +783,14 @@ func runIssuesSearch(args []string) error {
 // Jira API calls
 // ---------------------------------------------------------------------------
 
-func searchIssues(cfg Config, jql string, limit int) ([]JiraIssue, error) {
+type SearchIssuesResult struct {
+	Issues  []JiraIssue
+	Total   int
+	HasMore bool
+}
+
+func searchIssues(cfg Config, jql string, limit int) (SearchIssuesResult, error) {
+	result := SearchIssuesResult{}
 	var all []JiraIssue
 	nextPageToken := ""
 
@@ -521,7 +801,7 @@ func searchIssues(cfg Config, jql string, limit int) ([]JiraIssue, error) {
 
 		u, err := url.Parse(cfg.Server + "/rest/api/3/search/jql")
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 		q := u.Query()
 		q.Set("jql", jql)
@@ -534,32 +814,35 @@ func searchIssues(cfg Config, jql string, limit int) ([]JiraIssue, error) {
 
 		req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 		if err != nil {
-			return nil, err
+			return result, err
 		}
 		req.Header.Set("Accept", "application/json")
 
 		resp, err := client.Do(req)
 		if err != nil {
-			return nil, fmt.Errorf("jira api request failed: %w", err)
+			return result, fmt.Errorf("jira api request failed: %w", err)
 		}
 
 		var searchResp JiraSearchResponse
 		if err := decodeAPIResponse(resp, &searchResp); err != nil {
-			return nil, err
+			return result, err
 		}
+		result.Total = searchResp.Total
 
 		all = append(all, searchResp.Issues...)
+		nextPageToken = searchResp.NextPageToken
 
-		if len(searchResp.Issues) == 0 || searchResp.NextPageToken == "" {
+		if len(searchResp.Issues) == 0 || nextPageToken == "" {
 			break
 		}
-		nextPageToken = searchResp.NextPageToken
 	}
 
 	if len(all) > limit {
 		all = all[:limit]
 	}
-	return all, nil
+	result.Issues = all
+	result.HasMore = nextPageToken != "" || len(all) < result.Total
+	return result, nil
 }
 
 func getIssue(cfg Config, issueKey string) (JiraIssue, error) {
@@ -585,11 +868,18 @@ func getIssue(cfg Config, issueKey string) (JiraIssue, error) {
 	return issue, nil
 }
 
-func getComments(cfg Config, issueKey string) ([]JiraComment, error) {
-	u := cfg.Server + "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/comment?orderBy=-created&maxResults=20"
+func getComments(cfg Config, issueKey string, limit int) ([]JiraComment, error) {
+	u, err := url.Parse(cfg.Server + "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/comment")
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	q.Set("orderBy", "-created")
+	q.Set("maxResults", fmt.Sprintf("%d", limit))
+	u.RawQuery = q.Encode()
 
 	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
-	req, err := http.NewRequest(http.MethodGet, u, nil)
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
 	if err != nil {
 		return nil, err
 	}
@@ -605,6 +895,210 @@ func getComments(cfg Config, issueKey string) ([]JiraComment, error) {
 		return nil, err
 	}
 	return commentsResp.Comments, nil
+}
+
+func getTransitions(cfg Config, issueKey string) ([]JiraTransition, error) {
+	u := cfg.Server + "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/transitions"
+
+	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
+	req, err := http.NewRequest(http.MethodGet, u, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("jira api request failed: %w", err)
+	}
+
+	var result JiraTransitionsResponse
+	if err := decodeAPIResponse(resp, &result); err != nil {
+		return nil, err
+	}
+	return result.Transitions, nil
+}
+
+func doTransition(cfg Config, issueKey, transitionID string) error {
+	u := cfg.Server + "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/transitions"
+
+	body := JiraTransitionRequest{Transition: JiraTransitionID{ID: transitionID}}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("jira api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		trimmed := strings.TrimSpace(string(respBody))
+
+		var apiErr JiraAPIError
+		if err := json.Unmarshal(respBody, &apiErr); err == nil {
+			msgs := apiErr.ErrorMessages
+			for k, v := range apiErr.Errors {
+				msgs = append(msgs, fmt.Sprintf("%s: %s", k, v))
+			}
+			if len(msgs) > 0 {
+				return fmt.Errorf("jira api error (%s): %s", resp.Status, strings.Join(msgs, "; "))
+			}
+		}
+
+		if trimmed == "" {
+			trimmed = resp.Status
+		}
+		return fmt.Errorf("jira api error (%s): %s", resp.Status, trimmed)
+	}
+
+	return nil
+}
+
+func searchUser(cfg Config, query string) ([]JiraUser, error) {
+	u, err := url.Parse(cfg.Server + "/rest/api/3/user/search")
+	if err != nil {
+		return nil, err
+	}
+	q := u.Query()
+	q.Set("query", query)
+	u.RawQuery = q.Encode()
+
+	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
+	req, err := http.NewRequest(http.MethodGet, u.String(), nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, fmt.Errorf("jira api request failed: %w", err)
+	}
+
+	var users []JiraUser
+	if err := decodeAPIResponse(resp, &users); err != nil {
+		return nil, err
+	}
+	return users, nil
+}
+
+func assignIssue(cfg Config, issueKey, accountID string) error {
+	u := cfg.Server + "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/assignee"
+
+	body := JiraAssignRequest{AccountID: accountID}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
+	req, err := http.NewRequest(http.MethodPut, u, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("jira api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusNoContent {
+		respBody, _ := io.ReadAll(resp.Body)
+		trimmed := strings.TrimSpace(string(respBody))
+
+		var apiErr JiraAPIError
+		if err := json.Unmarshal(respBody, &apiErr); err == nil {
+			msgs := apiErr.ErrorMessages
+			for k, v := range apiErr.Errors {
+				msgs = append(msgs, fmt.Sprintf("%s: %s", k, v))
+			}
+			if len(msgs) > 0 {
+				return fmt.Errorf("jira api error (%s): %s", resp.Status, strings.Join(msgs, "; "))
+			}
+		}
+
+		if trimmed == "" {
+			trimmed = resp.Status
+		}
+		return fmt.Errorf("jira api error (%s): %s", resp.Status, trimmed)
+	}
+
+	return nil
+}
+
+func addComment(cfg Config, issueKey, text string) error {
+	u := cfg.Server + "/rest/api/3/issue/" + url.PathEscape(issueKey) + "/comment"
+
+	body := JiraCommentRequest{
+		Body: JiraADFDocument{
+			Type:    "doc",
+			Version: 1,
+			Content: []JiraADFParagraph{
+				{
+					Type: "paragraph",
+					Content: []JiraADFText{
+						{Type: "text", Text: text},
+					},
+				},
+			},
+		},
+	}
+	b, err := json.Marshal(body)
+	if err != nil {
+		return err
+	}
+
+	client := buildHTTPClient(cfg.Server, cfg.Email, cfg.APIToken)
+	req, err := http.NewRequest(http.MethodPost, u, bytes.NewReader(b))
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Accept", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		return fmt.Errorf("jira api request failed: %w", err)
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode != http.StatusCreated {
+		respBody, _ := io.ReadAll(resp.Body)
+		trimmed := strings.TrimSpace(string(respBody))
+
+		var apiErr JiraAPIError
+		if err := json.Unmarshal(respBody, &apiErr); err == nil {
+			msgs := apiErr.ErrorMessages
+			for k, v := range apiErr.Errors {
+				msgs = append(msgs, fmt.Sprintf("%s: %s", k, v))
+			}
+			if len(msgs) > 0 {
+				return fmt.Errorf("jira api error (%s): %s", resp.Status, strings.Join(msgs, "; "))
+			}
+		}
+
+		if trimmed == "" {
+			trimmed = resp.Status
+		}
+		return fmt.Errorf("jira api error (%s): %s", resp.Status, trimmed)
+	}
+
+	return nil
 }
 
 // ---------------------------------------------------------------------------
@@ -942,6 +1436,101 @@ func minInt(a, b int) int {
 		return a
 	}
 	return b
+}
+
+func matchTransition(transitions []JiraTransition, targetStatus string) (JiraTransition, string, string, error) {
+	query := strings.TrimSpace(targetStatus)
+	if query == "" {
+		return JiraTransition{}, "", "", errors.New("--status is required")
+	}
+
+	type scoredMatch struct {
+		transition JiraTransition
+		score      int
+	}
+
+	var exact []JiraTransition
+	var prefix []JiraTransition
+	var contains []scoredMatch
+	queryLower := strings.ToLower(query)
+
+	for _, t := range transitions {
+		nameLower := strings.ToLower(t.Name)
+		switch {
+		case strings.EqualFold(t.Name, query):
+			exact = append(exact, t)
+		case strings.HasPrefix(nameLower, queryLower):
+			prefix = append(prefix, t)
+		case strings.Contains(nameLower, queryLower):
+			contains = append(contains, scoredMatch{
+				transition: t,
+				score:      strings.Index(nameLower, queryLower),
+			})
+		}
+	}
+
+	if len(exact) > 0 {
+		return pickBestTransition(exact), "exact", "", nil
+	}
+	if len(prefix) > 0 {
+		picked := pickBestTransition(prefix)
+		return picked, "prefix", ambiguityWarning(query, prefix, picked), nil
+	}
+	if len(contains) > 0 {
+		sort.Slice(contains, func(i, j int) bool {
+			if contains[i].score != contains[j].score {
+				return contains[i].score < contains[j].score
+			}
+			ni := strings.ToLower(contains[i].transition.Name)
+			nj := strings.ToLower(contains[j].transition.Name)
+			if ni != nj {
+				return ni < nj
+			}
+			return len(contains[i].transition.Name) < len(contains[j].transition.Name)
+		})
+		candidates := make([]JiraTransition, 0, len(contains))
+		for _, c := range contains {
+			candidates = append(candidates, c.transition)
+		}
+		picked := pickBestTransition(candidates)
+		return picked, "contains", ambiguityWarning(query, candidates, picked), nil
+	}
+
+	var available []string
+	for _, t := range transitions {
+		available = append(available, t.Name)
+	}
+	return JiraTransition{}, "", "", fmt.Errorf("no transition matching %q; available transitions: %s", query, strings.Join(available, ", "))
+}
+
+func pickBestTransition(candidates []JiraTransition) JiraTransition {
+	if len(candidates) == 1 {
+		return candidates[0]
+	}
+	copyCandidates := append([]JiraTransition(nil), candidates...)
+	sort.Slice(copyCandidates, func(i, j int) bool {
+		ni := strings.ToLower(copyCandidates[i].Name)
+		nj := strings.ToLower(copyCandidates[j].Name)
+		if len(copyCandidates[i].Name) != len(copyCandidates[j].Name) {
+			return len(copyCandidates[i].Name) < len(copyCandidates[j].Name)
+		}
+		if ni != nj {
+			return ni < nj
+		}
+		return copyCandidates[i].ID < copyCandidates[j].ID
+	})
+	return copyCandidates[0]
+}
+
+func ambiguityWarning(query string, candidates []JiraTransition, selected JiraTransition) string {
+	if len(candidates) <= 1 {
+		return ""
+	}
+	names := make([]string, 0, len(candidates))
+	for _, t := range candidates {
+		names = append(names, t.Name)
+	}
+	return fmt.Sprintf("status %q matched multiple transitions (%s); using %q", query, strings.Join(names, ", "), selected.Name)
 }
 
 func isInteractive() bool {
