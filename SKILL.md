@@ -9,7 +9,7 @@ allowed-tools: Read, Bash
 
 # jiractl Skill
 
-Agent workflow for using `jiractl` to fetch Jira issues.
+Agent workflow for using `./jiractl.exe` to fetch Jira issues.
 
 ## Arguments
 
@@ -27,11 +27,11 @@ If mode is missing, infer from user request:
 ## Examples
 
 - User says: "show me my Jira tasks"
-  - Run: `jiractl issues mine --json`
+  - Run: `./jiractl.exe issues mine --json`
 - User says: "what's PROJ-123 about?"
-  - Run: `jiractl issues view PROJ-123 --json`
+  - Run: `./jiractl.exe issues view PROJ-123 --json`
 - User says: "find open bugs in PROJ"
-  - Run: `jiractl issues search --jql "project = PROJ AND type = Bug AND status != Done" --json`
+  - Run: `./jiractl.exe issues search --jql "project = PROJ AND type = Bug AND status != Done" --json`
 
 ## Steps
 
@@ -40,13 +40,13 @@ If mode is missing, infer from user request:
 Run:
 
 ```powershell
-jiractl auth status --json
+./jiractl.exe auth status --json
 ```
 
 If not authenticated, tell the user to run:
 
 ```powershell
-jiractl auth login --server https://company.atlassian.net --email you@company.com
+./jiractl.exe auth login --server https://company.atlassian.net --email you@company.com
 ```
 
 ### 2) Fetch issues (compact JSON for agent parsing)
@@ -54,19 +54,19 @@ jiractl auth login --server https://company.atlassian.net --email you@company.co
 My issues:
 
 ```powershell
-jiractl issues mine --limit 20 --json
+./jiractl.exe issues mine --limit 20 --json
 ```
 
 Single issue:
 
 ```powershell
-jiractl issues view PROJ-123 --json
+./jiractl.exe issues view PROJ-123 --json
 ```
 
 Custom search:
 
 ```powershell
-jiractl issues search --jql "project = PROJ AND status = 'In Progress'" --limit 50 --json
+./jiractl.exe issues search --jql "project = PROJ AND status = 'In Progress'" --limit 50 --json
 ```
 
 ### 3) Return structured results
@@ -87,7 +87,9 @@ $env:JIRACTL_JSON_ENVELOPE = "1"
 
 ## Error Handling
 
-- If command returns `not authenticated`, instruct user to run `jiractl auth login`.
+- If command returns `not authenticated`, instruct user to run `./jiractl.exe auth login`.
 - If command returns `401`, the API token may have expired. Instruct user to generate a new token.
 - If command returns `404`, the issue key or server URL may be incorrect.
 - If search returns no results, suggest broadening the JQL query.
+
+
