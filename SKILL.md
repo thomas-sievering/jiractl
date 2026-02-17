@@ -79,6 +79,12 @@ Parse JSON output and summarize for the user:
 
 Use the `url` field from JSON to provide clickable links.
 
+If downstream automation requires strict success/error wrapping, set:
+
+```powershell
+$env:JIRACTL_JSON_ENVELOPE = "1"
+```
+
 ## Error Handling
 
 - If command returns `not authenticated`, instruct user to run `jiractl auth login`.

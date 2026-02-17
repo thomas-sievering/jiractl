@@ -113,6 +113,11 @@ $env:JIRACTL_JSON_PRETTY = "1"   # PowerShell
 export JIRACTL_JSON_PRETTY=1      # bash/zsh
 ```
 
+Set `JIRACTL_JSON_ENVELOPE=1` for wrapped output:
+
+- Success: `{"ok":true,"data":...}`
+- Error: `{"ok":false,"error":{"code":"...","message":"..."}}`
+
 ```json
 {
   "server": "https://company.atlassian.net",

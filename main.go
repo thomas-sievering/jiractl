@@ -21,6 +21,8 @@ import (
 
 var version = "dev"
 
+const defaultHTTPTimeout = 30 * time.Second
+
 // ---------------------------------------------------------------------------
 // Config types
 // ---------------------------------------------------------------------------
@@ -194,6 +196,10 @@ type CommentResult struct {
 
 func main() {
 	if err := run(); err != nil {
+		if shouldPrintJSONError() {
+			_ = printJSONError(err)
+			os.Exit(1)
+		}
 		fmt.Fprintln(os.Stderr, "error:", err)
 		os.Exit(1)
 	}
@@ -1107,7 +1113,7 @@ func addComment(cfg Config, issueKey, text string) error {
 
 func buildHTTPClient(server, email, token string) *http.Client {
 	return &http.Client{
-		Timeout: 30 * time.Second,
+		Timeout: defaultHTTPTimeout,
 		Transport: &basicAuthTransport{
 			email: email,
 			token: token,
@@ -1400,7 +1406,7 @@ func formatDate(s string) string {
 // JSON output
 // ---------------------------------------------------------------------------
 
-func printJSON(v any) error {
+func emitJSONRaw(v any) error {
 	pretty := strings.TrimSpace(os.Getenv("JIRACTL_JSON_PRETTY")) == "1"
 	var (
 		b   []byte
@@ -1416,6 +1422,46 @@ func printJSON(v any) error {
 	}
 	fmt.Println(string(b))
 	return nil
+}
+
+func jsonEnvelopeEnabled() bool {
+	return strings.TrimSpace(os.Getenv("JIRACTL_JSON_ENVELOPE")) == "1"
+}
+
+func printJSON(v any) error {
+	if jsonEnvelopeEnabled() {
+		return emitJSONRaw(map[string]any{
+			"ok":   true,
+			"data": v,
+		})
+	}
+	return emitJSONRaw(v)
+}
+
+func printJSONError(err error) error {
+	msg := "unknown error"
+	if err != nil {
+		msg = err.Error()
+	}
+	return emitJSONRaw(map[string]any{
+		"ok": false,
+		"error": map[string]any{
+			"code":    "FATAL",
+			"message": msg,
+		},
+	})
+}
+
+func shouldPrintJSONError() bool {
+	if jsonEnvelopeEnabled() {
+		return true
+	}
+	for _, arg := range os.Args[1:] {
+		if arg == "--json" {
+			return true
+		}
+	}
+	return false
 }
 
 // ---------------------------------------------------------------------------
